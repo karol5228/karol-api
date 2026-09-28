@@ -40,7 +40,7 @@ const servidor = http.createServer((req, res) => {
 
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
-    // GET - Leer usuarios
+    // GET - Consultar usuarios
     if (req.method === 'GET' && req.url === '/datos') {
 
         const datos = leerDatos();
@@ -139,7 +139,9 @@ const servidor = http.createServer((req, res) => {
 
     // Ruta no encontrada
     else {
+
         res.writeHead(404);
+
         res.end(JSON.stringify({
             mensaje: 'Ruta no encontrada'
         }));
