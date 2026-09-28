@@ -1,153 +1,280 @@
-const http = require('http');
-const fs = require('fs');
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 
-const archivo = 'datos.csv';
-const PORT = 3001;
+const PORT = 3000;
+const CSV = path.join(__dirname, 'data', 'clientes.csv');
 
-function leerDatos() {
-    const contenido = fs.readFileSync(archivo, 'utf8');
-    const lineas = contenido.trim().split('\n');
+let siguienteSolicitud = 0;
 
-    const datos = [];
+// Leer clientes desde el CSV
+function leerClientes() {
+  const lineas = fs.readFileSync(CSV, 'utf8').trim().split(/\r?\n/);
 
-    for (let i = 1; i < lineas.length; i++) {
-        const partes = lineas[i].split(',');
-
-        datos.push({
-            id: parseInt(partes[0]),
-            nombre: partes[1],
-            correo: partes[2],
-            telefono: partes[3],
-            ciudad: partes[4],
-            edad: parseInt(partes[5])
-        });
-    }
-
-    return datos;
+  return lineas.slice(1).filter(Boolean).map(linea => {
+    const [id, nombre, correo] = linea.split(',');
+    return {
+      id: Number(id),
+      nombre,
+      correo
+    };
+  });
 }
 
-function guardarDatos(datos) {
-    let contenido = 'id,nombre,correo,telefono,ciudad,edad\n';
+// Guardar clientes en el CSV
+function guardarClientes(clientes) {
+  const lineas = clientes.map(c =>
+    `${c.id},${c.nombre},${c.correo}`
+  );
 
-    datos.forEach(dato => {
-        contenido += `${dato.id},${dato.nombre},${dato.correo},${dato.telefono},${dato.ciudad},${dato.edad}\n`;
+  fs.writeFileSync(
+    CSV,
+    ['id,nombre,correo', ...lineas].join('\n') + '\n'
+  );
+}
+
+// Responder en JSON
+function responder(res, estado, datos) {
+  const cuerpo = JSON.stringify(datos);
+
+  res.writeHead(estado, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'Content-Length': Buffer.byteLength(cuerpo)
+  });
+
+  res.end(cuerpo);
+}
+
+// Leer cuerpo de una petición
+function leerCuerpo(req) {
+  return new Promise((resolve, reject) => {
+    let texto = '';
+
+    req.on('data', bloque => {
+      texto += bloque;
+
+      if (texto.length > 10000) {
+        reject(new Error('Cuerpo demasiado grande'));
+        req.destroy();
+      }
     });
 
-    fs.writeFileSync(archivo, contenido);
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(texto));
+      } catch {
+        reject(new Error('JSON inválido'));
+      }
+    });
+
+    req.on('error', reject);
+  });
 }
 
-const servidor = http.createServer((req, res) => {
+// Validar datos
+function validar(datos) {
+  if (
+    !datos ||
+    typeof datos.nombre !== 'string' ||
+    typeof datos.correo !== 'string'
+  ) {
+    return false;
+  }
 
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  const nombre = datos.nombre.trim();
+  const correo = datos.correo.trim();
 
-    // GET - Consultar usuarios
-    if (req.method === 'GET' && req.url === '/datos') {
+  return (
+    !!nombre &&
+    !!correo &&
+    !/[\r\n,]/.test(nombre) &&
+    !/[\r\n,]/.test(correo) &&
+    correo.includes('@')
+  );
+}
 
-        const datos = leerDatos();
+// Crear servidor
+const servidor = http.createServer(async (req, res) => {
+  const numero = ++siguienteSolicitud;
 
-        res.writeHead(200);
-        res.end(JSON.stringify(datos, null, 2));
+  const url = new URL(
+    req.url,
+    `http://${req.headers.host || 'localhost'}`
+  );
+
+  const ruta = url.pathname;
+
+  console.log(`\n[${numero}] ${req.method} ${ruta}`);
+  console.log(`[${numero}] Headers recibidos:`, req.headers);
+
+  res.on('finish', () =>
+    console.log(`[${numero}] Respuesta: ${res.statusCode}`)
+  );
+
+  try {
+    // Ruta principal
+    if (req.method === 'GET' && ruta === '/') {
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8'
+      });
+
+      res.end('Servidor corriendo. Consulta /api/clientes');
+      return;
     }
 
-    // POST - Agregar usuario
-    else if (req.method === 'POST' && req.url === '/datos') {
+    const match = ruta.match(/^\/api\/clientes\/(\d+)$/);
 
-        let cuerpo = '';
+    if (ruta !== '/api/clientes' && !match) {
+      responder(res, 404, {
+        error: 'Ruta no encontrada'
+      });
+      return;
+    }
 
-        req.on('data', parte => {
-            cuerpo += parte;
+    const clientes = leerClientes();
+
+    const id = match ? Number(match[1]) : null;
+
+    const indice = match
+      ? clientes.findIndex(c => c.id === id)
+      : -1;
+
+    // GET todos
+    if (req.method === 'GET' && ruta === '/api/clientes') {
+      console.log(
+        `[${numero}] CSV leído: ${clientes.length} registros`
+      );
+
+      responder(res, 200, clientes);
+      return;
+    }
+
+    // GET uno
+    if (req.method === 'GET' && match) {
+      responder(
+        res,
+        indice < 0 ? 404 : 200,
+        indice < 0
+          ? { error: 'Cliente no encontrado' }
+          : clientes[indice]
+      );
+
+      return;
+    }
+
+    // POST
+    if (req.method === 'POST' && ruta === '/api/clientes') {
+      const datos = await leerCuerpo(req);
+
+      console.log(`[${numero}] JSON recibido:`, datos);
+
+      if (!validar(datos)) {
+        responder(res, 400, {
+          error: 'Nombre y correo válidos requeridos'
         });
 
-        req.on('end', () => {
+        return;
+      }
 
-            const nuevoDato = JSON.parse(cuerpo);
-            const datos = leerDatos();
+      const nuevo = {
+        id: Math.max(0, ...clientes.map(c => c.id)) + 1,
+        nombre: datos.nombre.trim(),
+        correo: datos.correo.trim()
+      };
 
-            nuevoDato.id = datos.length + 1;
+      clientes.push(nuevo);
+      guardarClientes(clientes);
 
-            datos.push(nuevoDato);
+      console.log(
+        `[${numero}] CSV escrito: nuevo id ${nuevo.id}`
+      );
 
-            guardarDatos(datos);
+      responder(res, 201, nuevo);
+      return;
+    }
 
-            res.writeHead(201);
-            res.end(JSON.stringify(nuevoDato, null, 2));
+    // PUT
+    if (req.method === 'PUT' && match) {
+      if (indice < 0) {
+        responder(res, 404, {
+          error: 'Cliente no encontrado'
         });
-    }
 
-    // PUT - Modificar usuario
-    else if (req.method === 'PUT' && req.url.startsWith('/datos/')) {
+        return;
+      }
 
-        const id = parseInt(req.url.split('/')[2]);
+      const datos = await leerCuerpo(req);
 
-        let cuerpo = '';
+      console.log(`[${numero}] JSON recibido:`, datos);
 
-        req.on('data', parte => {
-            cuerpo += parte;
+      if (!validar(datos)) {
+        responder(res, 400, {
+          error: 'Nombre y correo válidos requeridos'
         });
 
-        req.on('end', () => {
+        return;
+      }
 
-            const datos = leerDatos();
-            const dato = datos.find(d => d.id === id);
+      clientes[indice] = {
+        id,
+        nombre: datos.nombre.trim(),
+        correo: datos.correo.trim()
+      };
 
-            if (!dato) {
-                res.writeHead(404);
-                res.end(JSON.stringify({
-                    mensaje: 'Dato no encontrado'
-                }));
-                return;
-            }
+      guardarClientes(clientes);
 
-            const datosActualizados = JSON.parse(cuerpo);
+      console.log(
+        `[${numero}] CSV escrito: id ${id} actualizado`
+      );
 
-            dato.nombre = datosActualizados.nombre;
-            dato.correo = datosActualizados.correo;
-            dato.telefono = datosActualizados.telefono;
-            dato.ciudad = datosActualizados.ciudad;
-            dato.edad = datosActualizados.edad;
+      responder(res, 200, clientes[indice]);
+      return;
+    }
 
-            guardarDatos(datos);
-
-            res.writeHead(200);
-            res.end(JSON.stringify(dato, null, 2));
+    // DELETE
+    if (req.method === 'DELETE' && match) {
+      if (indice < 0) {
+        responder(res, 404, {
+          error: 'Cliente no encontrado'
         });
+
+        return;
+      }
+
+      const [eliminado] = clientes.splice(indice, 1);
+
+      guardarClientes(clientes);
+
+      console.log(
+        `[${numero}] CSV escrito: id ${id} eliminado`
+      );
+
+      responder(res, 200, eliminado);
+      return;
     }
 
-    // DELETE - Eliminar usuario
-    else if (req.method === 'DELETE' && req.url.startsWith('/datos/')) {
+    responder(res, 405, {
+      error: 'Método no permitido'
+    });
 
-        const id = parseInt(req.url.split('/')[2]);
+  } catch (error) {
+    console.error(
+      `[${numero}] Error:`,
+      error.message
+    );
 
-        const datos = leerDatos();
-        const posicion = datos.findIndex(d => d.id === id);
-
-        if (posicion === -1) {
-            res.writeHead(404);
-            res.end(JSON.stringify({
-                mensaje: 'Dato no encontrado'
-            }));
-            return;
-        }
-
-        const eliminado = datos.splice(posicion, 1);
-
-        guardarDatos(datos);
-
-        res.writeHead(200);
-        res.end(JSON.stringify(eliminado[0], null, 2));
+    if (!res.headersSent) {
+      responder(res, 400, {
+        error: error.message
+      });
     }
-
-    // Ruta no encontrada
-    else {
-
-        res.writeHead(404);
-
-        res.end(JSON.stringify({
-            mensaje: 'Ruta no encontrada'
-        }));
-    }
+  }
 });
 
+// Iniciar servidor
 servidor.listen(PORT, '0.0.0.0', () => {
-    console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
+  console.log(
+    `Servidor escuchando en http://localhost:${PORT}`
+  );
 });
