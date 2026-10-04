@@ -2,6 +2,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
+const { eventLogger, metricas } = require('./bigdata/eventLogger');
+
 const PORT = 3000;
 const CSV = path.join(__dirname, 'data', 'clientes.csv');
 
@@ -70,6 +72,10 @@ function leerBody(req) {
 }
 
 const server = http.createServer(async (req, res) => {
+
+  // FASE 4: registrar evento HTTP
+  eventLogger(req, res);
+
   const url = new URL(
     req.url,
     `http://${req.headers.host || 'localhost'}`
@@ -92,9 +98,34 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // FASE 4: endpoint de prueba de eventos
+  if (ruta === '/api/laboratorio/evento') {
+    responderJSON(res, 200, {
+      recibido: true,
+      metodo: req.method
+    });
+    return;
+  }
+
+  // FASE 4: métricas de eventos
+  if (
+    req.method === 'GET' &&
+    ruta === '/api/bigdata/metricas'
+  ) {
+    responderJSON(res, 200, {
+      ...metricas,
+      ahora: new Date().toISOString()
+    });
+    return;
+  }
+
   // GET /api/clientes
-  if (req.method === 'GET' && ruta === '/api/clientes') {
+  if (
+    req.method === 'GET' &&
+    ruta === '/api/clientes'
+  ) {
     const clientes = leerClientes();
+
     responderJSON(res, 200, clientes);
     return;
   }
@@ -121,7 +152,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   // POST /api/clientes
-  if (req.method === 'POST' && ruta === '/api/clientes') {
+  if (
+    req.method === 'POST' &&
+    ruta === '/api/clientes'
+  ) {
     try {
       const datos = await leerBody(req);
 
@@ -169,7 +203,9 @@ const server = http.createServer(async (req, res) => {
 
       const clientes = leerClientes();
 
-      const posicion = clientes.findIndex(c => c.id === id);
+      const posicion = clientes.findIndex(
+        c => c.id === id
+      );
 
       if (posicion === -1) {
         responderJSON(res, 404, {
@@ -212,7 +248,9 @@ const server = http.createServer(async (req, res) => {
 
     const clientes = leerClientes();
 
-    const posicion = clientes.findIndex(c => c.id === id);
+    const posicion = clientes.findIndex(
+      c => c.id === id
+    );
 
     if (posicion === -1) {
       responderJSON(res, 404, {
