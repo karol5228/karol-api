@@ -1,283 +1,606 @@
-const http = require('node:http');
-const fs = require('node:fs');
-const path = require('node:path');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
 const PORT = 3000;
-const CSV_FILE = path.join(__dirname, 'data', 'clientes.csv');
 
-let requestNumber = 0;
+const DATA_DIR = path.join(__dirname, 'data');
+const CLIENTES_FILE = path.join(DATA_DIR, 'clientes.csv');
+const EVENTOS_FILE = path.join(DATA_DIR, 'eventos.ndjson');
 
-function readClients() {
-    const content = fs.readFileSync(CSV_FILE, 'utf8').trim();
+fs.mkdirSync(DATA_DIR, { recursive: true });
 
-    if (!content) {
-        return [];
+if (!fs.existsSync(CLIENTES_FILE)) {
+  fs.writeFileSync(
+    CLIENTES_FILE,
+    'id,nombre,correo\n1,Ana Ruiz,ana@example.com\n2,Luis Mora,luis@example.com\n3,Eva Paz,eva@example.com\n',
+    'utf8'
+  );
+}
+
+if (!fs.existsSync(EVENTOS_FILE)) {
+  fs.writeFileSync(EVENTOS_FILE, '', 'utf8');
+}
+
+let contadorEventos = obtenerUltimoIdEvento();
+
+function obtenerUltimoIdEvento() {
+  try {
+    const contenido = fs.readFileSync(EVENTOS_FILE, 'utf8').trim();
+
+    if (!contenido) return 0;
+
+    const lineas = contenido.split('\n');
+    const ultimaLinea = JSON.parse(lineas[lineas.length - 1]);
+
+    return Number(ultimaLinea.id) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function enviarJSON(res, status, data) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  });
+
+  res.end(JSON.stringify(data));
+}
+
+function obtenerBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+
+    req.on('data', chunk => {
+      body += chunk;
+    });
+
+    req.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch {
+        reject(new Error('JSON inválido'));
+      }
+    });
+
+    req.on('error', reject);
+  });
+}
+
+function leerClientes() {
+  const contenido = fs.readFileSync(CLIENTES_FILE, 'utf8').trim();
+
+  if (!contenido) return [];
+
+  const lineas = contenido.split('\n').slice(1);
+
+  return lineas
+    .filter(linea => linea.trim() !== '')
+    .map(linea => {
+      const [id, nombre, correo] = linea.split(',');
+
+      return {
+        id: Number(id),
+        nombre,
+        correo
+      };
+    });
+}
+
+function guardarClientes(clientes) {
+  const contenido = [
+    'id,nombre,correo',
+    ...clientes.map(
+      cliente => `${cliente.id},${cliente.nombre},${cliente.correo}`
+    )
+  ].join('\n');
+
+  fs.writeFileSync(CLIENTES_FILE, contenido + '\n', 'utf8');
+}
+
+function registrarEvento({
+  tipo,
+  fuente = 'backend',
+  calidad = 'valido',
+  detalle = {},
+  duracion_ms = 0
+}) {
+  contadorEventos++;
+
+  const evento = {
+    id: contadorEventos,
+    timestamp: new Date().toISOString(),
+    tipo,
+    fuente,
+    calidad,
+    duracion_ms,
+    detalle
+  };
+
+  fs.appendFileSync(
+    EVENTOS_FILE,
+    JSON.stringify(evento) + '\n',
+    'utf8'
+  );
+
+  return evento;
+}
+
+function leerEventos() {
+  const contenido = fs.readFileSync(EVENTOS_FILE, 'utf8').trim();
+
+  if (!contenido) return [];
+
+  return contenido
+    .split('\n')
+    .filter(linea => linea.trim() !== '')
+    .map(linea => JSON.parse(linea));
+}
+
+function generarDuracion() {
+  const duracion = Math.floor(Math.random() * 500) + 20;
+
+  // Aproximadamente 10% de eventos tendrán duración negativa
+  if (Math.random() < 0.10) {
+    return -duracion;
+  }
+
+  return duracion;
+}
+
+function generarEventoSintetico() {
+  const tipos = [
+    'visita_frontend',
+    'click_interfaz',
+    'busqueda',
+    'cliente_creado',
+    'cliente_editado',
+    'cliente_eliminado',
+    'api_listar_clientes'
+  ];
+
+  const tipo = tipos[Math.floor(Math.random() * tipos.length)];
+
+  let detalle = {};
+
+  if (tipo === 'busqueda') {
+    const terminos = ['ana', 'luis', 'eva', 'maria', 'cliente'];
+
+    detalle = {
+      termino:
+        terminos[Math.floor(Math.random() * terminos.length)],
+      resultados: Math.floor(Math.random() * 5)
+    };
+  }
+
+  if (tipo === 'click_interfaz') {
+    detalle = {
+      boton: 'generar_eventos'
+    };
+  }
+
+  if (tipo === 'api_listar_clientes') {
+    detalle = {
+      resultados: leerClientes().length
+    };
+  }
+
+  return registrarEvento({
+    tipo,
+    fuente: Math.random() > 0.5 ? 'frontend' : 'backend',
+    calidad: 'valido',
+    detalle,
+    duracion_ms: generarDuracion()
+  });
+}
+
+function calcularP95(valores) {
+  if (valores.length === 0) return 0;
+
+  const ordenados = [...valores].sort((a, b) => a - b);
+
+  const posicion = Math.ceil(0.95 * ordenados.length) - 1;
+
+  return ordenados[Math.max(0, posicion)];
+}
+
+function calcularAnalitica() {
+  const eventos = leerEventos();
+
+  const ahora = Date.now();
+
+  const eventosUltimoMinuto = eventos.filter(evento => {
+    const tiempoEvento = new Date(evento.timestamp).getTime();
+
+    return ahora - tiempoEvento <= 60000;
+  });
+
+  const validos = eventos.filter(
+    evento =>
+      evento.calidad === 'valido' &&
+      Number(evento.duracion_ms) >= 0
+  );
+
+  const sospechosos = eventos.filter(
+    evento => Number(evento.duracion_ms) < 0
+  );
+
+  const tipos = {};
+
+  validos.forEach(evento => {
+    tipos[evento.tipo] = (tipos[evento.tipo] || 0) + 1;
+  });
+
+  let interaccionMasFrecuente = null;
+
+  Object.entries(tipos).forEach(([tipo, cantidad]) => {
+    if (
+      !interaccionMasFrecuente ||
+      cantidad > interaccionMasFrecuente.cantidad
+    ) {
+      interaccionMasFrecuente = {
+        tipo,
+        cantidad
+      };
     }
+  });
 
-    const lines = content.split(/\r?\n/);
-    const headers = lines[0].split(',');
+  const duracionesValidas = validos.map(evento =>
+    Number(evento.duracion_ms)
+  );
 
-    return lines.slice(1).filter(Boolean).map(line => {
-        const values = line.split(',');
-        const client = {};
+  const promedioDuracion =
+    duracionesValidas.length > 0
+      ? duracionesValidas.reduce((a, b) => a + b, 0) /
+        duracionesValidas.length
+      : 0;
 
-        headers.forEach((header, index) => {
-            client[header] = values[index] || '';
-        });
+  const porcentajeValidos =
+    eventos.length > 0
+      ? (validos.length / eventos.length) * 100
+      : 0;
 
-        return client;
-    });
-}
-
-function saveClients(clients) {
-    const lines = [
-        'id,nombre,correo',
-        ...clients.map(client =>
-            `${client.id},${client.nombre},${client.correo}`
-        )
-    ];
-
-    fs.writeFileSync(CSV_FILE, lines.join('\n'));
-}
-
-function sendJSON(res, statusCode, data) {
-    res.writeHead(statusCode, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
-    });
-
-    res.end(JSON.stringify(data));
-}
-
-function readBody(req) {
-    return new Promise((resolve, reject) => {
-        let body = '';
-
-        req.on('data', chunk => {
-            body += chunk;
-        });
-
-        req.on('end', () => {
-            resolve(body);
-        });
-
-        req.on('error', reject);
-    });
+  return {
+    total_eventos: eventos.length,
+    eventos_ultimo_minuto: eventosUltimoMinuto.length,
+    tipos_evento: Object.keys(tipos).length,
+    eventos_validos: validos.length,
+    eventos_sospechosos: sospechosos.length,
+    porcentaje_validos: Number(porcentajeValidos.toFixed(2)),
+    promedio_duracion_ms: Number(promedioDuracion.toFixed(2)),
+    p95_duracion_ms: calcularP95(duracionesValidas),
+    interaccion_mas_frecuente: interaccionMasFrecuente,
+    valor: interaccionMasFrecuente
+      ? `La interacción más frecuente es ${interaccionMasFrecuente.tipo} con ${interaccionMasFrecuente.cantidad} eventos válidos.`
+      : 'Todavía no hay suficientes eventos para obtener valor.'
+  };
 }
 
 const server = http.createServer(async (req, res) => {
-    requestNumber++;
+  const inicio = Date.now();
 
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const pathname = url.pathname;
-    const method = req.method;
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type'
+    });
 
-    console.log(
-        `[${requestNumber}] ${method} ${pathname} | Origin: ${req.headers.origin || '-'}`
-    );
+    res.end();
+    return;
+  }
 
-    if (method === 'OPTIONS') {
-        res.writeHead(204, {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type'
+  const url = new URL(
+    req.url,
+    `http://${req.headers.host}`
+  );
+
+  const ruta = url.pathname;
+
+  try {
+    // =========================
+    // HEALTH
+    // =========================
+
+    if (
+      req.method === 'GET' &&
+      (ruta === '/' || ruta === '/health')
+    ) {
+      enviarJSON(res, 200, {
+        ok: true,
+        mensaje: 'Backend funcionando',
+        puerto: PORT
+      });
+
+      return;
+    }
+
+    // =========================
+    // CLIENTES - LISTAR
+    // =========================
+
+    if (
+      req.method === 'GET' &&
+      ruta === '/api/clientes'
+    ) {
+      const clientes = leerClientes();
+
+      registrarEvento({
+        tipo: 'api_listar_clientes',
+        fuente: 'backend',
+        detalle: {
+          resultados: clientes.length
+        },
+        duracion_ms: Date.now() - inicio
+      });
+
+      enviarJSON(res, 200, clientes);
+
+      return;
+    }
+
+    // =========================
+    // CLIENTES - CREAR
+    // =========================
+
+    if (
+      req.method === 'POST' &&
+      ruta === '/api/clientes'
+    ) {
+      const body = await obtenerBody(req);
+
+      if (!body.nombre || !body.correo) {
+        enviarJSON(res, 400, {
+          error: 'Nombre y correo son obligatorios'
         });
 
-        res.end();
-
-        console.log(`[${requestNumber}] -> 204`);
         return;
+      }
+
+      const clientes = leerClientes();
+
+      const nuevoId =
+        clientes.length > 0
+          ? Math.max(...clientes.map(c => c.id)) + 1
+          : 1;
+
+      const nuevoCliente = {
+        id: nuevoId,
+        nombre: body.nombre,
+        correo: body.correo
+      };
+
+      clientes.push(nuevoCliente);
+
+      guardarClientes(clientes);
+
+      registrarEvento({
+        tipo: 'cliente_creado',
+        fuente: 'backend',
+        detalle: {
+          id: nuevoId,
+          nombre: body.nombre
+        },
+        duracion_ms: Date.now() - inicio
+      });
+
+      enviarJSON(res, 201, nuevoCliente);
+
+      return;
     }
 
-    try {
-        if (method === 'GET' && (pathname === '/' || pathname === '/health')) {
-            sendJSON(res, 200, {
-                ok: true,
-                mensaje: 'Backend funcionando',
-                puerto: PORT
-            });
+    // =========================
+    // CLIENTES - EDITAR
+    // =========================
 
-            console.log(`[${requestNumber}] -> 200`);
-            return;
-        }
+    if (
+      req.method === 'PUT' &&
+      ruta.startsWith('/api/clientes/')
+    ) {
+      const id = Number(ruta.split('/').pop());
 
-        if (method === 'GET' && pathname === '/api/clientes') {
-            const clients = readClients();
+      const body = await obtenerBody(req);
 
-            sendJSON(res, 200, clients);
+      const clientes = leerClientes();
 
-            console.log(`[${requestNumber}] -> 200`);
-            return;
-        }
+      const indice = clientes.findIndex(
+        cliente => cliente.id === id
+      );
 
-        const idMatch = pathname.match(/^\/api\/clientes\/(\d+)$/);
-
-        if (idMatch) {
-            const id = Number(idMatch[1]);
-            const clients = readClients();
-            const index = clients.findIndex(
-                client => Number(client.id) === id
-            );
-
-            if (method === 'GET') {
-                if (index === -1) {
-                    sendJSON(res, 404, {
-                        error: 'Cliente no encontrado'
-                    });
-
-                    console.log(`[${requestNumber}] -> 404`);
-                    return;
-                }
-
-                sendJSON(res, 200, clients[index]);
-
-                console.log(`[${requestNumber}] -> 200`);
-                return;
-            }
-
-            if (method === 'PUT') {
-                const body = await readBody(req);
-                const data = JSON.parse(body);
-
-                if (!data.nombre || !data.correo) {
-                    sendJSON(res, 400, {
-                        error: 'nombre y correo son obligatorios'
-                    });
-
-                    console.log(`[${requestNumber}] -> 400`);
-                    return;
-                }
-
-                if (
-                    String(data.nombre).includes(',') ||
-                    String(data.nombre).includes('\n') ||
-                    String(data.correo).includes(',') ||
-                    String(data.correo).includes('\n')
-                ) {
-                    sendJSON(res, 400, {
-                        error: 'No se permiten comas ni saltos de línea'
-                    });
-
-                    console.log(`[${requestNumber}] -> 400`);
-                    return;
-                }
-
-                if (index === -1) {
-                    sendJSON(res, 404, {
-                        error: 'Cliente no encontrado'
-                    });
-
-                    console.log(`[${requestNumber}] -> 404`);
-                    return;
-                }
-
-                clients[index] = {
-                    id,
-                    nombre: String(data.nombre).trim(),
-                    correo: String(data.correo).trim()
-                };
-
-                saveClients(clients);
-
-                sendJSON(res, 200, clients[index]);
-
-                console.log(`[${requestNumber}] -> 200`);
-                return;
-            }
-
-            if (method === 'DELETE') {
-                if (index === -1) {
-                    sendJSON(res, 404, {
-                        error: 'Cliente no encontrado'
-                    });
-
-                    console.log(`[${requestNumber}] -> 404`);
-                    return;
-                }
-
-                const deleted = clients.splice(index, 1)[0];
-
-                saveClients(clients);
-
-                sendJSON(res, 200, {
-                    mensaje: 'Cliente eliminado',
-                    cliente: deleted
-                });
-
-                console.log(`[${requestNumber}] -> 200`);
-                return;
-            }
-        }
-
-        if (method === 'POST' && pathname === '/api/clientes') {
-            const body = await readBody(req);
-            const data = JSON.parse(body);
-
-            if (!data.nombre || !data.correo) {
-                sendJSON(res, 400, {
-                    error: 'nombre y correo son obligatorios'
-                });
-
-                console.log(`[${requestNumber}] -> 400`);
-                return;
-            }
-
-            if (
-                String(data.nombre).includes(',') ||
-                String(data.nombre).includes('\n') ||
-                String(data.correo).includes(',') ||
-                String(data.correo).includes('\n')
-            ) {
-                sendJSON(res, 400, {
-                    error: 'No se permiten comas ni saltos de línea'
-                });
-
-                console.log(`[${requestNumber}] -> 400`);
-                return;
-            }
-
-            const clients = readClients();
-
-            const newId =
-                clients.length > 0
-                    ? Math.max(...clients.map(client => Number(client.id))) + 1
-                    : 1;
-
-            const newClient = {
-                id: newId,
-                nombre: String(data.nombre).trim(),
-                correo: String(data.correo).trim()
-            };
-
-            clients.push(newClient);
-
-            saveClients(clients);
-
-            sendJSON(res, 201, newClient);
-
-            console.log(`[${requestNumber}] -> 201`);
-            return;
-        }
-
-        sendJSON(res, 404, {
-            error: 'Ruta no encontrada'
+      if (indice === -1) {
+        enviarJSON(res, 404, {
+          error: 'Cliente no encontrado'
         });
 
-        console.log(`[${requestNumber}] -> 404`);
+        return;
+      }
 
-    } catch (error) {
-        console.error(error);
+      clientes[indice] = {
+        id,
+        nombre: body.nombre,
+        correo: body.correo
+      };
 
-        sendJSON(res, 500, {
-            error: 'Error interno del servidor'
-        });
+      guardarClientes(clientes);
 
-        console.log(`[${requestNumber}] -> 500`);
+      registrarEvento({
+        tipo: 'cliente_editado',
+        fuente: 'backend',
+        detalle: {
+          id
+        },
+        duracion_ms: Date.now() - inicio
+      });
+
+      enviarJSON(res, 200, clientes[indice]);
+
+      return;
     }
+
+    // =========================
+    // CLIENTES - ELIMINAR
+    // =========================
+
+    if (
+      req.method === 'DELETE' &&
+      ruta.startsWith('/api/clientes/')
+    ) {
+      const id = Number(ruta.split('/').pop());
+
+      const clientes = leerClientes();
+
+      const cliente = clientes.find(
+        c => c.id === id
+      );
+
+      if (!cliente) {
+        enviarJSON(res, 404, {
+          error: 'Cliente no encontrado'
+        });
+
+        return;
+      }
+
+      const nuevosClientes = clientes.filter(
+        c => c.id !== id
+      );
+
+      guardarClientes(nuevosClientes);
+
+      registrarEvento({
+        tipo: 'cliente_eliminado',
+        fuente: 'backend',
+        detalle: {
+          id
+        },
+        duracion_ms: Date.now() - inicio
+      });
+
+      enviarJSON(res, 200, {
+        mensaje: 'Cliente eliminado',
+        cliente
+      });
+
+      return;
+    }
+
+    // =========================
+    // REGISTRAR EVENTO
+    // =========================
+
+    if (
+      req.method === 'POST' &&
+      ruta === '/api/eventos'
+    ) {
+      const body = await obtenerBody(req);
+
+      const evento = registrarEvento({
+        tipo: body.tipo || 'evento_desconocido',
+        fuente: body.fuente || 'frontend',
+        calidad: body.calidad || 'valido',
+        detalle: body.detalle || {},
+        duracion_ms:
+          body.duracion_ms !== undefined
+            ? Number(body.duracion_ms)
+            : Date.now() - inicio
+      });
+
+      enviarJSON(res, 201, evento);
+
+      return;
+    }
+
+    // =========================
+    // CONSULTAR EVENTOS
+    // =========================
+
+    if (
+      req.method === 'GET' &&
+      ruta === '/api/eventos'
+    ) {
+      const limite =
+        Number(url.searchParams.get('limite')) || 10;
+
+      const eventos = leerEventos();
+
+      const recientes = eventos
+        .slice(-limite)
+        .reverse();
+
+      enviarJSON(res, 200, recientes);
+
+      return;
+    }
+
+    // =========================
+    // GENERAR EVENTOS
+    // =========================
+
+    if (
+      req.method === 'POST' &&
+      ruta === '/api/eventos/generar'
+    ) {
+      const body = await obtenerBody(req);
+
+      let cantidad = Number(body.cantidad) || 100;
+
+      cantidad = Math.min(
+        Math.max(cantidad, 1),
+        1000
+      );
+
+      const eventos = [];
+
+      for (let i = 0; i < cantidad; i++) {
+        eventos.push(generarEventoSintetico());
+      }
+
+      enviarJSON(res, 201, {
+        mensaje: 'Eventos generados correctamente',
+        cantidad: eventos.length,
+        primer_evento: eventos[0],
+        ultimo_evento: eventos[eventos.length - 1]
+      });
+
+      return;
+    }
+
+    // =========================
+    // ANALÍTICA 5V
+    // =========================
+
+    if (
+      req.method === 'GET' &&
+      ruta === '/api/analitica/resumen'
+    ) {
+      const resumen = calcularAnalitica();
+
+      enviarJSON(res, 200, resumen);
+
+      return;
+    }
+
+    // =========================
+    // RUTA NO ENCONTRADA
+    // =========================
+
+    enviarJSON(res, 404, {
+      error: 'Ruta no encontrada'
+    });
+
+  } catch (error) {
+    console.error(error);
+
+    enviarJSON(res, 500, {
+      error: error.message
+    });
+  }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Backend funcionando en http://localhost:${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Servidor HTTP ejecutándose en http://localhost:${PORT}`);
 });
